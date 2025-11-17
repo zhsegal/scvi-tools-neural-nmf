@@ -878,8 +878,8 @@ class LDVAE(VAE):
                 loadings = self.decoder.factor_regressor.fc_layers[0][0].weight
 
         loadings = loadings.detach().cpu().numpy()
-        # if self.n_batch > 1:
-        #     loadings = loadings[:, : -self.n_batch]
+        if self.n_batch > 1 and not self.weights_positive:
+            loadings = loadings[:, : -self.n_batch]
 
         return loadings
 
