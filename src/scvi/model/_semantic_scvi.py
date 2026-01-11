@@ -50,7 +50,7 @@ class SemanticSCVI(LinearSCVI):
     def train(self, max_epochs=None, warmup_epochs=0, **kwargs):
         train_callbacks = kwargs.get("callbacks", []) or []
         if warmup_epochs > 0:
-            print(f"🕒 Warmup Enabled: Semantic Loss ({self.module.loss_mode}) OFF for {warmup_epochs} epochs.")
+            print(f"Warmup Enabled: Semantic Loss ({self.module.loss_mode}) OFF for {warmup_epochs} epochs.")
             train_callbacks.insert(0, SemanticWarmupCallback(warmup_epochs))
             kwargs["callbacks"] = train_callbacks
         
