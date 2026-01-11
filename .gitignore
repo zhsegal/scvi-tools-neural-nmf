@@ -2,6 +2,7 @@
 .DS_Store
 *~
 buck-out/
+jupyter_test_gpu.log    
 
 # Compiled files
 .venv/
@@ -29,3 +30,4 @@ __pycache__/
 
 # node
 /node_modules/
+notebooks/

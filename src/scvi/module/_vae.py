@@ -931,3 +931,82 @@ class LDVAE(VAE):
 
             object.__setattr__(loss_output, "loss", loss_output.loss + decor_loss * self.decorrelation_loss_weight)
         return loss_output
+
+
+class SemanticLDVAE(LDVAE):
+    """
+    Dual-Mode Semantic LDVAE.
+    Supports two types of semantic enforcement:
+    1. 'centroid': Penalizes genes far from the center of their assigned factor.
+    2. 'geometric': Enforces pairwise distance structure (Isometric Matching).
+    """
+    def __init__(
+        self,
+        n_input: int,
+        semantic_map: torch.Tensor,
+        coherence_weight: float = 10.0,
+        loss_mode: str = 'centroid', # 'centroid' or 'geometric'
+        n_gene_sample: int = 1024,   # only  for geometric mode
+        **kwargs,
+    ):
+        if "weights_positive" not in kwargs:
+            kwargs["weights_positive"] = True
+
+        super().__init__(n_input=n_input, **kwargs)
+
+       
+        self.register_buffer("semantic_map", semantic_map)
+        self.coherence_weight = coherence_weight
+        self.loss_mode = loss_mode
+        self.n_gene_sample = n_gene_sample
+        
+        
+        self.register_buffer("semantic_loss_scale", torch.tensor(1.0)) # warm up switch
+
+    def loss(self, *args, **kwargs):
+        
+        loss_output = super().loss(*args, **kwargs) # get original LDVAE lostt
+
+        
+        if self.weights_positive:
+            raw_w = self.decoder.factor_regressor.fc_layers[0][0].X_layer.weight
+            W = torch.nn.functional.softplus(raw_w)
+        else:
+            raw_w = self.decoder.factor_regressor.fc_layers[0][0].weight
+            W = torch.nn.functional.softplus(raw_w)
+
+        weighted_loss = torch.tensor(0.0, device=self.device)
+
+        if self.loss_mode == 'centroid': # 
+            W_prob = W / (W.sum(dim=0, keepdim=True) + 1e-6)
+            
+            centroids = torch.matmul(W_prob.T, self.semantic_map)
+            
+            distances = (self.semantic_map.unsqueeze(1) - centroids.unsqueeze(0)).pow(2).sum(dim=2)
+            
+            raw_loss = (W_prob * distances).sum()
+            weighted_loss = self.semantic_loss_scale * self.coherence_weight * raw_loss
+
+        elif self.loss_mode == 'geometric':
+            n_genes = self.semantic_map.shape[0]
+            curr_sample = min(self.n_gene_sample, n_genes)
+            indices = torch.randperm(n_genes, device=self.device)[:curr_sample] # sample subset of genes to reduce computation time
+
+            W_sub = W[indices]
+            S_sub = self.semantic_map[indices]
+
+            W_norm = torch.nn.functional.normalize(W_sub, p=2, dim=1)
+            S_norm = torch.nn.functional.normalize(S_sub, p=2, dim=1)
+            
+            sim_W = torch.mm(W_norm, W_norm.t()) 
+            sim_S = torch.mm(S_norm, S_norm.t())
+
+            raw_loss = torch.nn.functional.mse_loss(sim_W, sim_S)
+            weighted_loss = self.semantic_loss_scale * self.coherence_weight * raw_loss # actural sematnic loss calculation with weight
+
+        new_total_loss = loss_output.loss + weighted_loss
+        object.__setattr__(loss_output, "loss", new_total_loss)
+        
+        loss_output.extra_metrics["coherence_loss"] = weighted_loss
+
+        return loss_output
