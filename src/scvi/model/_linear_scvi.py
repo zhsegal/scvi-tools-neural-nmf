@@ -97,7 +97,7 @@ class LinearSCVI(
         dropout_rate: float = 0.1,
         dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
-        use_observed_lib_size: bool = False,
+        use_observed_lib_size: bool = True,
         latent_distribution: Literal["normal", "ln"] = "normal",
         **model_kwargs,
     ):

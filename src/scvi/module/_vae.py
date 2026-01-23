@@ -796,14 +796,16 @@ class LDVAE(VAE):
         use_batch_norm: bool = True,
         bias: bool = False,
         latent_distribution: str = "normal",
-        use_observed_lib_size: bool = False,
+        use_observed_lib_size: bool = True,
         weights_positive: bool = False,
+        softmax_z: bool = False,
         decorrelation_loss_weight=120,
         min_cor=0,
         **kwargs,
     ):
         from scvi.nn import Encoder, LinearDecoderSCVI
 
+        
         super().__init__(
             n_input=n_input,
             n_batch=n_batch,
@@ -820,6 +822,7 @@ class LDVAE(VAE):
             **kwargs,
         )
         self.use_batch_norm = use_batch_norm
+        self.softmax_z=softmax_z
         self.z_encoder = Encoder(
             n_input,
             n_latent,
@@ -853,6 +856,20 @@ class LDVAE(VAE):
         self.weights_positive = weights_positive
         self.decorrelation_loss_weight = decorrelation_loss_weight
         self.min_cor = min_cor
+        
+        
+    def generative(self, z, *args, **kwargs):
+        """
+        Override the generative step to apply the Simplex constraint.
+        """
+        # If we are in NMF mode, apply Softmax to z.
+        # This ensures sum(z) = 1 for every cell.
+        # Result: z represents PROPORTIONS, not magnitude.
+        
+        if self.softmax_z:
+             z = torch.nn.functional.softmax(z, dim=-1)
+        
+        return super().generative(z, *args, **kwargs)
 
     @torch.inference_mode()
     def get_loadings(self) -> np.ndarray:
@@ -932,7 +949,6 @@ class LDVAE(VAE):
             object.__setattr__(loss_output, "loss", loss_output.loss + decor_loss * self.decorrelation_loss_weight)
         return loss_output
 
-
 class SemanticLDVAE(LDVAE):
     """
     Dual-Mode Semantic LDVAE.
@@ -946,42 +962,70 @@ class SemanticLDVAE(LDVAE):
         semantic_map: torch.Tensor,
         coherence_weight: float = 10.0,
         loss_mode: str = 'centroid', # 'centroid' or 'geometric'
-        n_gene_sample: int = 1024,   # only  for geometric mode
+        n_gene_sample: int = 1024, 
+        use_importance_sampling: bool = True, # only for geometric mode
+        use_huber_loss: bool = False,         # <--- NEW SWITCH
+        huber_delta: float = 0.1,             # <--- NEW PARAMETER
         **kwargs,
     ):
         if "weights_positive" not in kwargs:
             kwargs["weights_positive"] = True
-
+            
         super().__init__(n_input=n_input, **kwargs)
 
-       
         self.register_buffer("semantic_map", semantic_map)
         self.coherence_weight = coherence_weight
         self.loss_mode = loss_mode
         self.n_gene_sample = n_gene_sample
+        self.use_importance_sampling = use_importance_sampling
+        self.use_huber_loss = use_huber_loss
+        self.huber_delta = huber_delta
         
+        # This buffer is updated by the SemanticWarmupCallback
+        self.register_buffer("semantic_loss_scale", torch.tensor(1.0))
         
-        self.register_buffer("semantic_loss_scale", torch.tensor(1.0)) # warm up switch
+        gene_norms = torch.norm(semantic_map, p=2, dim=1)
+        probs = gene_norms + 1e-6        
+        self.register_buffer("sampling_probs", probs / probs.sum()) 
 
-    def loss(self, *args, **kwargs):
-        
-        loss_output = super().loss(*args, **kwargs) # get original LDVAE lostt
-
+    def get_effective_loadings(self):
+        """
+        Extracts the effective weights used for prediction.
+        Math: W_effective = W_raw * (Gamma / Sigma)
+        """
+        layer = self.decoder.factor_regressor.fc_layers[0][0]
         
         if self.weights_positive:
-            raw_w = self.decoder.factor_regressor.fc_layers[0][0].X_layer.weight
-            W = torch.nn.functional.softplus(raw_w)
+             w_raw = torch.nn.functional.softplus(layer.X_layer.weight)
         else:
-            raw_w = self.decoder.factor_regressor.fc_layers[0][0].weight
-            W = torch.nn.functional.softplus(raw_w)
+             w_raw = torch.nn.functional.softplus(layer.weight)
 
+        if self.use_batch_norm:
+            bn = self.decoder.factor_regressor.fc_layers[0][1]
+            
+            gamma = bn.weight
+            sigma = torch.sqrt(bn.running_var + bn.eps)
+            
+            scale = (gamma / sigma).unsqueeze(1)
+            w_effective = w_raw * scale
+        else:
+            w_effective = w_raw
+            
+        return w_effective
+
+    def loss(self, *args, **kwargs):
+        loss_output = super().loss(*args, **kwargs) # get original LDVAE loss
+
+        # --- FIX: Use Effective Loadings instead of Raw Weights ---
+        W = self.get_effective_loadings()
+        
         weighted_loss = torch.tensor(0.0, device=self.device)
 
-        if self.loss_mode == 'centroid': # 
+        if self.loss_mode == 'centroid': 
+            # Normalized probabilities
             W_prob = W / (W.sum(dim=0, keepdim=True) + 1e-6)
             
             centroids = torch.matmul(W_prob.T, self.semantic_map)
-            
             distances = (self.semantic_map.unsqueeze(1) - centroids.unsqueeze(0)).pow(2).sum(dim=2)
             
             raw_loss = (W_prob * distances).sum()
@@ -990,8 +1034,16 @@ class SemanticLDVAE(LDVAE):
         elif self.loss_mode == 'geometric':
             n_genes = self.semantic_map.shape[0]
             curr_sample = min(self.n_gene_sample, n_genes)
-            indices = torch.randperm(n_genes, device=self.device)[:curr_sample] # sample subset of genes to reduce computation time
-
+            
+            if self.use_importance_sampling:
+                indices = torch.multinomial(
+                    self.sampling_probs, 
+                    num_samples=curr_sample, 
+                    replacement=False
+                )
+            else:
+                indices = torch.randperm(n_genes, device=self.device)[:curr_sample]
+            
             W_sub = W[indices]
             S_sub = self.semantic_map[indices]
 
@@ -1001,12 +1053,20 @@ class SemanticLDVAE(LDVAE):
             sim_W = torch.mm(W_norm, W_norm.t()) 
             sim_S = torch.mm(S_norm, S_norm.t())
 
-            raw_loss = torch.nn.functional.mse_loss(sim_W, sim_S)
-            weighted_loss = self.semantic_loss_scale * self.coherence_weight * raw_loss # actural sematnic loss calculation with weight
+            # --- SWITCH: MSE vs Huber ---
+            if self.use_huber_loss:
+                # Huber: Robust to outliers (linear penalty for large errors)
+                raw_loss = torch.nn.functional.huber_loss(sim_W, sim_S, delta=self.huber_delta)
+            else:
+                # MSE: Standard squared error (aggressive penalty for large errors)
+                raw_loss = torch.nn.functional.mse_loss(sim_W, sim_S)
+                
+            weighted_loss = self.semantic_loss_scale * self.coherence_weight * raw_loss 
 
         new_total_loss = loss_output.loss + weighted_loss
         object.__setattr__(loss_output, "loss", new_total_loss)
         
         loss_output.extra_metrics["coherence_loss"] = weighted_loss
+        loss_output.extra_metrics["semantic_scale"] = self.semantic_loss_scale
 
         return loss_output

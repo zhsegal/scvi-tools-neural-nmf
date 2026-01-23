@@ -41,7 +41,7 @@ class SemanticSCVI(LinearSCVI):
             n_gene_sample=n_gene_sample,
             **kwargs
         )
-        
+
         self._model_summary_string = (
             f"SemanticSCVI Model (Mode: {loss_mode})\n"
             f"Weight: {coherence_weight}, n_latent: {self.n_latent}"
@@ -53,5 +53,5 @@ class SemanticSCVI(LinearSCVI):
             print(f"Warmup Enabled: Semantic Loss ({self.module.loss_mode}) OFF for {warmup_epochs} epochs.")
             train_callbacks.insert(0, SemanticWarmupCallback(warmup_epochs))
             kwargs["callbacks"] = train_callbacks
-        
+
         super(SemanticSCVI, self).train(max_epochs=max_epochs, **kwargs)
