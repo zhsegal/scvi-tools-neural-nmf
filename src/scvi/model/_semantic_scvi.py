@@ -46,12 +46,17 @@ class SemanticSCVI(LinearSCVI):
             f"SemanticSCVI Model (Mode: {loss_mode})\n"
             f"Weight: {coherence_weight}, n_latent: {self.n_latent}"
         )
+        self.init_params_ = self._get_init_params(locals())
 
-    def train(self, max_epochs=None, warmup_epochs=0, **kwargs):
+    def train(self, max_epochs=None, warmup_epochs=0, n_epochs_kl_warmup=40, **kwargs):
         train_callbacks = kwargs.get("callbacks", []) or []
         if warmup_epochs > 0:
             print(f"Warmup Enabled: Semantic Loss ({self.module.loss_mode}) OFF for {warmup_epochs} epochs.")
             train_callbacks.insert(0, SemanticWarmupCallback(warmup_epochs))
             kwargs["callbacks"] = train_callbacks
+
+        plan_kwargs = kwargs.get("plan_kwargs") or {}
+        plan_kwargs.setdefault("n_epochs_kl_warmup", n_epochs_kl_warmup)
+        kwargs["plan_kwargs"] = plan_kwargs
 
         super(SemanticSCVI, self).train(max_epochs=max_epochs, **kwargs)
