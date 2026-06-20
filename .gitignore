@@ -30,7 +30,21 @@ __pycache__/
 
 # node
 /node_modules/
-notebooks/
+
+# notebooks/: track code (.ipynb/.py/.md/.sh), ignore data & heavy artifacts
+notebooks/benchmark_results/
+notebooks/.model_cache*/
+notebooks/**/figures/
+notebooks/**/logs/
+notebooks/**/__pycache__/
+notebooks/**/.ipynb_checkpoints/
+notebooks/MF/jobs/
+notebooks/MF/data/
+notebooks/MF/models/
+notebooks/MF/tables/
+notebooks/MF/benchmark_results/
+notebooks/**/data/
+notebooks/**/models/
 
 # Claude runtime + Jupyter MCP secrets
 /.claude/jupyter_mcp/
@@ -41,3 +55,27 @@ notebooks/
 /.jupyter/
 .jupyter_ystore.db
 *.bsub.log
+
+# data / model / artifact files (keeps notebook *code* trackable, data out)
+*.h5ad
+*.hdf5
+*.h5
+*.pt
+*.pth
+*.ckpt
+*.parquet
+*.pkl
+*.npy
+*.npz
+*.gz
+*.bam
+*.bai
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.html
+*.tsv
+*.pyc
+*.pickle
+*.zip
