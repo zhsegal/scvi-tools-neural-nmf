@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+from scvi.external import SemanticSCVIVA
 from scvi.model import LinearSCVI
 from scvi.model._semantic_scvi import SemanticSCVI
 
@@ -263,6 +264,109 @@ def train_or_load_semantic_scvi(
     return model
 
 
+def train_or_load_semantic_scviva(
+    adata,
+    semantic_map,
+    *,
+    cache_dir: Path,
+    force_train: bool,
+    max_epochs: int,
+    warmup_epochs: int,
+    n_epochs_kl_warmup: int = 40,
+    labels_key: str = "cell_type",
+    sample_key: str = "sample",
+    batch_key: str | None = None,
+    cell_coordinates_key: str = "spatial",
+    expression_embedding_key: str = "X_scVI",
+    k_nn: int = 20,
+    stage1_kwargs: dict | None = None,
+    init_type_blocks: str = "shared",
+    warm_start_encoder: bool = False,
+    **kwargs,
+):
+    """Two-stage SemanticSCVIVA: Stage-1 SemanticSCVI seed -> warm-started joint model.
+
+    Stage 1 trains a vanilla ``SemanticSCVI`` (on an isolated ``adata.copy()`` to avoid
+    scvi UUID collisions); its latent replaces SCVIVA's ``X_scVI`` embedding and seeds the
+    niche-activation/composition targets. Stage 2 warm-starts the decoder and trains the
+    joint model. Returns ``(stage1_model, stage2_model)``.
+
+    Cache: Stage 1 under ``cache_dir/stage1_semantic_scvi``, Stage 2 under
+    ``cache_dir/stage2_semantic_scviva``.
+    """
+    cache_dir = Path(cache_dir)
+    stage1_dir = cache_dir / "stage1_semantic_scvi"
+    stage2_dir = cache_dir / "stage2_semantic_scviva"
+    stage1_kwargs = dict(stage1_kwargs or {})
+    stage1_kwargs.setdefault("n_latent", kwargs.get("n_latent", 10))
+
+    # ----- Stage 1: SemanticSCVI on an isolated copy -----
+    adata_s1 = adata.copy()
+    stage1 = train_or_load_semantic_scvi(
+        adata_s1,
+        semantic_map,
+        cache_dir=stage1_dir,
+        force_train=force_train,
+        max_epochs=max_epochs,
+        warmup_epochs=warmup_epochs,
+        n_epochs_kl_warmup=n_epochs_kl_warmup,
+        labels_key=labels_key,
+        batch_key=batch_key,
+        **stage1_kwargs,
+    )
+
+    # ----- write the Stage-1 latent as the embedding seed, build niche targets -----
+    SemanticSCVIVA.preprocess_with_semantic_scvi(
+        adata,
+        stage1,
+        semantic_scvi_adata=adata_s1,
+        expression_embedding_key=expression_embedding_key,
+        sample_key=sample_key,
+        labels_key=labels_key,
+        cell_coordinates_key=cell_coordinates_key,
+        k_nn=k_nn,
+    )
+    SemanticSCVIVA.setup_anndata(
+        adata,
+        labels_key=labels_key,
+        sample_key=sample_key,
+        batch_key=batch_key,
+        expression_embedding_key=expression_embedding_key,
+    )
+
+    if stage2_dir.exists() and not force_train:
+        try:
+            model = SemanticSCVIVA.load(str(stage2_dir), adata=adata)
+            _log(f"  loaded SemanticSCVIVA from {stage2_dir}")
+            return stage1, model
+        except Exception as exc:
+            _log(f"  load failed ({exc!r}); retraining")
+
+    _log(
+        f"Training SemanticSCVIVA (max_epochs={max_epochs}, warmup_epochs={warmup_epochs}, "
+        f"gate_mode={kwargs.get('gate_mode', 'soft')})..."
+    )
+    model = SemanticSCVIVA.from_semantic_scvi(
+        stage1,
+        adata,
+        semantic_map=semantic_map,
+        init_type_blocks=init_type_blocks,
+        warm_start_encoder=warm_start_encoder,
+        **kwargs,
+    )
+    t0 = time.time()
+    model.train(
+        max_epochs=max_epochs,
+        warmup_epochs=warmup_epochs,
+        n_epochs_kl_warmup=n_epochs_kl_warmup,
+    )
+    _log(f"  SemanticSCVIVA done in {time.time() - t0:.1f}s")
+    stage2_dir.parent.mkdir(parents=True, exist_ok=True)
+    model.save(str(stage2_dir), overwrite=True)
+    _log(f"  saved to {stage2_dir}")
+    return stage1, model
+
+
 def train_or_load_nonneg_ldvae(
     adata,
     *,
@@ -332,6 +436,35 @@ class _ScviAdapter:
 
     def get_loadings(self):
         return self._model.get_loadings()
+
+
+class _SemanticScvivaAdapter:
+    """Exposes ``SemanticSCVIVA`` via the standard benchmark contract.
+
+    ``loadings='all'`` returns every factor (shared + per-cell-type blocks);
+    ``loadings='shared'`` returns only the ``n_latent`` shared-block columns, for a
+    like-for-like comparison against the pre-spatial ``SemanticSCVI`` (which has
+    ``n_latent`` factors).
+    """
+
+    def __init__(self, model, adata, loadings: str = "all"):
+        self._model = model
+        self._adata = adata
+        self._loadings = loadings
+
+    @property
+    def module(self):
+        return self._model.module
+
+    def get_latent_representation(self, adata=None):
+        return self._model.get_latent_representation(self._adata)
+
+    def get_loadings(self):
+        df = self._model.get_loadings()
+        if self._loadings == "shared":
+            shared = [c for c in df.columns if c.startswith("shared_")]
+            return df[shared]
+        return df
 
 
 # ---------------------------------------------------------------------------

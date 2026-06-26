@@ -10,6 +10,7 @@ from .resolvi import RESOLVI
 from .scar import SCAR
 from .scbasset import SCBASSET
 from .scviva import SCVIVA
+from .semantic_scviva import SemanticSCVIVA
 from .solo import SOLO
 from .stereoscope import RNAStereoscope, SpatialStereoscope
 from .sysvi import SysVI
@@ -37,5 +38,6 @@ __all__ = [
     "METHYLANVI",
     "RESOLVI",
     "SCVIVA",
+    "SemanticSCVIVA",
     "CYTOVI",
 ]
